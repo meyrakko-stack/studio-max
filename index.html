@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="th">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#071526">
+  <title>Studio max — File Hub</title>
+  <style>
+    :root{color-scheme:dark;font-family:system-ui,'Noto Sans Thai',sans-serif}*{box-sizing:border-box}
+    body{margin:0;min-height:100vh;color:#e9f3ff;background:radial-gradient(ellipse at 85% 0%,#073b73 0%,#081526 42%,#060b14 90%)}
+    .wrap{max-width:960px;margin:auto;padding:26px 18px}header,.row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}header,.space{justify-content:space-between}
+    .brand{font-size:24px;font-weight:900;letter-spacing:-1px}.brand span,.accent{color:#43baff}.pill{display:inline-block;border:1px solid #286ba1;border-radius:99px;padding:8px 14px;background:#0c223b;color:#9bd9ff}
+    .hero{margin:58px 0 30px}.hero h1{font-size:clamp(32px,7vw,62px);margin:8px 0}.hero p,.muted{color:#a1b7cf}
+    .panel{background:#0d1b2be8;border:1px solid #214260;border-radius:20px;padding:22px;box-shadow:0 14px 50px #0004;margin:18px 0}
+    button{cursor:pointer;border:0;background:linear-gradient(120deg,#1577e8,#36baff);color:white;font-weight:750;padding:11px 17px;border-radius:11px}button:hover{filter:brightness(1.13)}button:disabled{opacity:.55;cursor:wait}button.secondary{background:#18324e}button.danger{background:#72283c}
+    input{background:#071321;border:1px solid #325476;border-radius:10px;padding:12px;color:white;width:100%;margin:7px 0 13px}label{font-size:13px;color:#b4cce5}
+    .file{display:flex;align-items:center;gap:12px;padding:15px 0;border-bottom:1px solid #263e54}.file:last-child{border:0}.meta{flex:1;min-width:0}.meta strong{display:block;overflow-wrap:anywhere}.meta small{color:#9eb4c9}
+    #notice{min-height:24px;color:#75d4ff;white-space:pre-wrap}.hidden{display:none!important}footer{text-align:center;color:#607f9b;margin:45px 0}progress{width:100%;height:12px;margin-top:12px}
+    @media(max-width:500px){.file{align-items:flex-start}.file .row{flex-direction:column;align-items:stretch}}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header><div class="brand">STUDIO <span>MAX</span></div><button id="loginToggle" class="secondary" type="button">🔐 แอดมิน</button></header>
+  <section class="hero"><div class="pill">✦ PUBLIC FILE LIBRARY</div><h1>แชร์ไฟล์ได้ <span class="accent">ง่ายกว่าเดิม</span></h1><p>ดาวน์โหลดไฟล์จาก Studio max ได้ฟรี ไม่ต้องสมัครสมาชิก</p></section>
+  <div id="notice" role="status" aria-live="polite"></div>
+  <section id="loginPanel" class="panel hidden"><h2>เข้าสู่ระบบแอดมิน</h2><form id="loginForm"><label for="username">ชื่อผู้ใช้</label><input id="username" required autocomplete="username" placeholder="ชื่อแอดมิน"><label for="password">รหัสผ่าน</label><input id="password" required type="password" autocomplete="current-password"><div class="row"><button id="loginBtn" type="submit">เข้าสู่ระบบ</button><button type="button" id="cancelLogin" class="secondary">ปิด</button></div></form></section>
+  <section id="adminPanel" class="panel hidden"><div class="row space"><h2>⚡ จัดการไฟล์</h2><button id="logout" class="secondary" type="button">ออกจากระบบ</button></div><label for="uploadInput">เลือกไฟล์เพื่ออัปโหลด (สูงสุด 50 MB)</label><input id="uploadInput" type="file"><button id="uploadBtn" type="button">⬆ อัปโหลดไฟล์</button></section>
+  <section class="panel"><div class="row space"><div><h2 style="margin:0">📁 คลังไฟล์ทั้งหมด</h2><p class="muted" id="count">กำลังโหลด...</p></div><button id="refresh" class="secondary" type="button">↻ รีเฟรช</button></div><div id="files"></div></section>
+  <footer>© Studio max • Powered by Supabase</footer>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script>
+'use strict';
+// ใส่ค่าจาก Supabase Dashboard เท่านั้น: Project URL, publishable/anon key, อีเมลแอดมิน
+// ห้ามใส่ service_role key, secret key หรือรหัสผ่านในไฟล์นี้
+const SUPABASE_URL = 'PASTE_SUPABASE_PROJECT_URL';
+const SUPABASE_ANON_KEY = 'PASTE_SUPABASE_ANON_KEY';
+const ADMIN_EMAIL = 'PASTE_ADMIN_AUTH_EMAIL';
+const BUCKET = 'studio-max-files';
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
+const $ = id => document.getElementById(id);
+const notice = message => { $('notice').textContent = message; };
+const configured = () => /^https:\/\/.+\.supabase\.co\/?$/.test(SUPABASE_URL) && SUPABASE_ANON_KEY.length > 20 && !SUPABASE_ANON_KEY.startsWith('PASTE_') && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ADMIN_EMAIL);
+let db = null;
+let admin = false;
+let listing = false;
+const safeName = name => name.replace(/[\\/\u0000-\u001f\u007f]/g, '_').slice(0, 180);
+function bytes(n) { return n < 1024 ? n + ' B' : n < 1048576 ? (n / 1024).toFixed(1) + ' KB' : (n / 1048576).toFixed(1) + ' MB'; }
+function ui() {
+  $('adminPanel').classList.toggle('hidden', !admin);
+  $('loginToggle').textContent = admin ? '✓ แอดมิน MY_T' : '🔐 แอดมิน';
+  if (admin) $('loginPanel').classList.add('hidden');
+}
+async function check() {
+  const { data, error } = await db.auth.getUser();
+  admin = !error && !!data.user && data.user.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase();
+  ui();
+}
+async function list() {
+  if (!db || listing) return;
+  listing = true;
+  $('refresh').disabled = true;
+  $('count').textContent = 'กำลังโหลด...';
+  try {
+    const { data, error } = await db.storage.from(BUCKET).list('', { limit: 1000, sortBy: { column: 'created_at', order: 'desc' } });
+    if (error) throw error;
+    const files = (data || []).filter(f => f.id && f.name && !f.name.startsWith('.'));
+    $('count').textContent = files.length + ' ไฟล์' + (files.length === 1000 ? ' (แสดงสูงสุด 1000 ไฟล์)' : '');
+    const root = $('files');
+    root.replaceChildren();
+    if (!files.length) { root.textContent = 'ยังไม่มีไฟล์'; return; }
+    for (const f of files) {
+      const div = document.createElement('div'); div.className = 'file';
+      const meta = document.createElement('div'); meta.className = 'meta';
+      const name = document.createElement('strong'); name.textContent = f.name;
+      const small = document.createElement('small'); small.textContent = bytes(f.metadata?.size || 0) + ' • ' + (f.created_at ? new Date(f.created_at).toLocaleDateString('th-TH') : '');
+      meta.append(name, small);
+      const actions = document.createElement('div'); actions.className = 'row';
+      const dl = document.createElement('button'); dl.type = 'button'; dl.textContent = '↓ ดาวน์โหลด';
+      dl.onclick = async () => {
+        dl.disabled = true;
+        try {
+          const { data, error } = await db.storage.from(BUCKET).createSignedUrl(f.name, 120, { download: f.name });
+          if (error) throw error;
+          window.location.assign(data.signedUrl);
+        } catch (e) { notice('ดาวน์โหลดไม่สำเร็จ: ' + e.message); }
+        finally { dl.disabled = false; }
+      };
+      actions.append(dl);
+      if (admin) {
+        const del = document.createElement('button'); del.type = 'button'; del.className = 'danger'; del.textContent = 'ลบ';
+        del.onclick = async () => {
+          if (!confirm('ลบไฟล์ ' + f.name + ' ?')) return;
+          del.disabled = true;
+          try {
+            const { error } = await db.storage.from(BUCKET).remove([f.name]);
+            if (error) throw error;
+            notice('ลบไฟล์แล้ว'); await list();
+          } catch (e) { notice('ลบไม่สำเร็จ: ' + e.message); }
+          finally { del.disabled = false; }
+        };
+        actions.append(del);
+      }
+      div.append(meta, actions); root.append(div);
+    }
+  } catch (e) { $('count').textContent = 'โหลดรายการไม่สำเร็จ'; notice('โหลดรายการไม่สำเร็จ: ' + e.message); }
+  finally { listing = false; $('refresh').disabled = false; }
+}
+$('loginToggle').onclick = () => { if (!admin) $('loginPanel').classList.toggle('hidden'); };
+$('cancelLogin').onclick = () => $('loginPanel').classList.add('hidden');
+$('refresh').onclick = list;
+$('loginForm').onsubmit = async event => {
+  event.preventDefault();
+  if (!db) { notice('กรุณาตั้งค่า Supabase ก่อน'); return; }
+  if ($('username').value.trim() !== 'MY_T') { notice('ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง'); return; }
+  $('loginBtn').disabled = true;
+  try {
+    const { error } = await db.auth.signInWithPassword({ email: ADMIN_EMAIL, password: $('password').value });
+    if (error) throw error;
+    await check();
+    notice(admin ? 'เข้าสู่ระบบสำเร็จ' : 'บัญชีนี้ไม่มีสิทธิ์แอดมิน');
+    await list();
+  } catch { notice('ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง'); }
+  finally { $('password').value = ''; $('loginBtn').disabled = false; }
+};
+$('logout').onclick = async () => {
+  if (!db) return;
+  const { error } = await db.auth.signOut();
+  if (error) { notice('ออกจากระบบไม่สำเร็จ: ' + error.message); return; }
+  await check(); await list(); notice('ออกจากระบบแล้ว');
+};
+$('uploadBtn').onclick = async () => {
+  if (!db || !admin) return;
+  const f = $('uploadInput').files[0];
+  if (!f) { notice('กรุณาเลือกไฟล์'); return; }
+  if (f.size > MAX_FILE_SIZE) { notice('ไฟล์ใหญ่เกิน 50 MB'); return; }
+  const filename = Date.now() + '-' + crypto.randomUUID().slice(0, 8) + '-' + safeName(f.name);
+  $('uploadBtn').disabled = true; notice('กำลังอัปโหลด...');
+  try {
+    const { error } = await db.storage.from(BUCKET).upload(filename, f, { upsert: false, contentType: f.type || 'application/octet-stream' });
+    if (error) throw error;
+    $('uploadInput').value = '';
+    notice('อัปโหลดสำเร็จ');
+    await list();
+  } catch (e) { notice('อัปโหลดไม่สำเร็จ: ' + e.message); }
+  finally { $('uploadBtn').disabled = false; }
+};
+(async () => {
+  if (!configured()) { notice('⚙️ ยังไม่ได้ตั้งค่า Supabase: กรุณาใส่ URL, publishable/anon key และอีเมลแอดมิน'); $('count').textContent = 'รอการตั้งค่า'; return; }
+  if (!window.supabase?.createClient) { notice('โหลด Supabase SDK ไม่สำเร็จ กรุณาตรวจสอบอินเทอร์เน็ต'); $('count').textContent = 'เชื่อมต่อไม่ได้'; return; }
+  try {
+    db = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    await check(); await list();
+    db.auth.onAuthStateChange(() => { setTimeout(async () => { await check(); await list(); }, 0); });
+  } catch (e) { notice('เชื่อมต่อไม่สำเร็จ: ' + e.message); }
+})();
+</script>
+</body>
+</html>
